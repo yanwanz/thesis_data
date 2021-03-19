@@ -1,0 +1,73 @@
+---
+title: "Data Analysis"
+author: "Yanwan Zhu"
+date: "3/18/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readr)
+```
+
+```{r function - read in pcibex results}
+# Set working directory to source file location
+
+# User-defined function to read in PCIbex Farm results files
+read.pcibex <- function(filepath, auto.colnames=TRUE, fun.col=function(col,cols){cols[cols==col]<-paste(col,"Ibex",sep=".");return(cols)}) {
+  n.cols <- max(count.fields(filepath,sep=",",quote=NULL),na.rm=TRUE)
+  if (auto.colnames){
+    cols <- c()
+    con <- file(filepath, "r")
+    while ( TRUE ) {
+      line <- readLines(con, n = 1, warn=FALSE)
+      if ( length(line) == 0) {
+        break
+      }
+      m <- regmatches(line,regexec("^# (\\d+)\\. (.+)\\.$",line))[[1]]
+      if (length(m) == 3) {
+        index <- as.numeric(m[2])
+        value <- m[3]
+        if (index < length(cols)){
+          cols <- c()
+        }
+        if (is.function(fun.col)){
+          cols <- fun.col(value,cols)
+        }
+        cols[index] <- value
+        if (index == n.cols){
+          break
+        }
+      }
+    }
+    close(con)
+    return(read_csv(filepath, comment="#", col_names=cols))
+  }
+  else{
+    return(read_csv(filepath, comment="#", col_names=seq(1:n.cols)))
+  }
+}
+```
+
+
+```{r message=FALSE}
+# Read in results file
+results <- read.pcibex("data/results_Mar18.csv")
+# Fix out-of-place column names
+colnames(results) <- c("X0", colnames(results))
+# Clean data
+pcibex_data <- results %>%
+  filter(X5=="trials" & X9=="PressedKey") %>%
+  rename(ParticipantID = X12, selected = X10) %>%
+  select(-(X0:X9), -X11)%>%
+  mutate(selected = if_else(selected=="F", "n", "ng"))
+```
+
+```{r}
+pcibex_data %>%
+  group_by(AudioFile)%>%
+  summarize(n=n())%>%
+  arrange(n)
+```
+
