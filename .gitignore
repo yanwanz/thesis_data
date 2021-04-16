@@ -6,3 +6,4 @@
 *.html
 laRaReanalysis*
 /paper*
+.DS_Store

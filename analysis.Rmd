@@ -2,7 +2,10 @@
 title: "Data Analysis"
 author: "Yanwan Zhu"
 date: "3/18/2021"
-output: html_document
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
 ---
 
 ```{r setup, include=FALSE}
@@ -14,6 +17,10 @@ library(lmerTest)
 library(patchwork)
 library(papaja)
 library(jtools)
+library(ggsignif)
+library(lubridate)
+library(psych)
+library(sjPlot)
 ```
 
 ## Read in data
@@ -66,9 +73,65 @@ pcibex_data <- results %>%
 # pcibex_data %>% group_by(ParticipantID)%>% summarize(n=n())%>%arrange(n)
 ```
 
-```{r recode variables}
+### Qualtrics data
+
+```{r qualtrics data}
+library(readxl)
+qualtrics_data <- read_excel("data/qualtrics_apr7.xlsx")
+qualtrics_data <- qualtrics_data[-1,]
+
+# Clean Qualtrics data
+qualtrics_data <- qualtrics_data %>%
+  rename(Group=City) %>%
+  mutate(Group=ifelse(Group=="是", "SH", "BJ")) 
+
+# Calculate age from messy birthdate values
+second.word <- function(my.string){
+    unlist(strsplit(my.string, " "))[2]
+}  
+qualtrics_data$Month <- sapply(qualtrics_data$`Birthdate#1_1`, second.word)
+
+qualtrics_data <- qualtrics_data %>%
+  mutate(Birthdate = ymd(paste(`Birthdate#3_1`, Month,`Birthdate#2_1`, sep="-"))) %>%
+  mutate(Age = as.period(interval(Birthdate, as.Date("2021-04-07")))$year) %>%
+  select(-`Birthdate#1_1`, -`Birthdate#2_1`, -`Birthdate#3_1`, -Month, -Birthdate) %>%
+  # Clean Gender variable
+  mutate(Gender = case_when(str_detect(Gender, "F") ~ "Female",
+                            str_detect(Gender, "M") ~ "Male",
+                            is.na(Gender) ~ "Non-binary")) %>%
+  # Clean age of acquiring Mandarin
+  mutate(ageMandarin_cat = case_when(ageMandarin == "0-3岁" ~ "Before Age 3",
+                                 ageMandarin == "3-6岁" ~ "Age 3 to 6",
+                                 ageMandarin == "6-11岁" ~ "Age 6 to 11"),
+         ageMandarin = ifelse(ageMandarin_cat != "Before Age 3" & listLanguages_1 < 3, NA, listLanguages_1 ),
+         ageMandarin_cat = ordered(ageMandarin_cat, levels = c("Before Age 3", "Age 3 to 6", "Age 6 to 11"))) %>%
+  mutate(liveAbroad = case_when(livingAbroad == "有 Yes" ~ "Yes",
+                                  livingAbroad == "没有 No" ~ "No"),
+         liveAbroad = factor(liveAbroad, levels = c("Yes", "No"))) %>%
+  rename(currentMC_perc = currentExposure_1,
+         currentSW_perc = currentExposure_2,
+         currentOther_perc = currentExposure_3)
+
+pcibex_ID <- pcibex_data %>%
+  group_by(ParticipantID) %>%
+  summarise()  
+
+language_data <- qualtrics_data %>%
+  select(ParticipantID, Gender, Age, Group, ageMandarin_cat, ageMandarin, numberOfLanguages, liveAbroad, currentMC_perc, currentSW_perc, currentOther_perc) %>%
+  # Drop participants who do not pass language background screening
+  # Drop participants who seemed to choose randomly
+  filter(!ParticipantID %in% c(81692, 43908)) %>%
+  filter(ParticipantID %in% pcibex_ID$ParticipantID) %>%
+  # Treatment coding for group: BJ as reference
+  mutate(Group_tr = ifelse(Group=="BJ", 0, 1),
+         n_languages = as.numeric(numberOfLanguages))
+```
+
+```{r recode & rescale variables}
 pcibex_data <- pcibex_data %>%
   mutate(nValue = if_else(Value=="n", 0, 1),
+         VowelStep_1to5 = VowelStep,
+         NasalStep_1to5 = NasalStep,
          VowelStep = case_when(VowelStep == 1 ~ 1,
                                VowelStep == 2 ~ 6,
                                VowelStep == 3 ~ 10.5,
@@ -78,20 +141,39 @@ pcibex_data <- pcibex_data %>%
                                NasalStep == 2 ~ 6,
                                NasalStep == 3 ~ 10.5,
                                NasalStep == 4 ~ 15,
-                               NasalStep == 5 ~ 20))
+                               NasalStep == 5 ~ 20),
+         # Reflect original intervals
+         NasalStep = ifelse(VowelStep == 10.5 & NasalStep == 10.5, 
+                            10, NasalStep)) %>%
+  mutate(Value_c = ifelse(nValue==0, -0.5, 0.5),
+           # Center VowelStep and NasalStep around 0
+           cVowelStep = scale(VowelStep, center = TRUE, scale = TRUE),
+           cNasalStep = scale(NasalStep, center = TRUE, scale = TRUE)
+         ) %>%
+  group_by(ParticipantID) %>%
+  mutate(RT = scale(ReactionTime, center = TRUE, scale = TRUE)) %>%
+  ungroup()
+
+combined_data <- inner_join(pcibex_data, language_data, by="ParticipantID")
 ```
 
-### Qualtrics data
+```{r distribution of RT}
+ggplot(pcibex_data, aes(RT)) +
+  geom_density()
+# 99 percentile
+ggplot(pcibex_data%>%filter(RT < quantile(RT, 0.995) & RT > quantile(RT, 0.005)), aes(RT))+
+  geom_density()
+```
 
-```{r qualtrics data}
-library(readxl)
-qualtrics_data <- read_excel("data/qualtrics_apr7.xlsx")
-qualtrics_data <- qualtrics_data[-1,]
-group_data <- qualtrics_data %>%
-  filter(ParticipantID != 81692) %>%
-  select(ParticipantID, City) %>%
-  rename(Group=City) %>%
-  mutate(Group=ifelse(Group=="是", "SH", "BJ"))
+```{r age distributions, include=FALSE, eval=FALSE}
+SH_data <- language_data%>%
+  filter(Group_tr==1) %>%
+  mutate(ageMandarin = as.numeric(ageMandarin))
+
+ggplot(SH_data, aes(x=ageMandarin))+
+  geom_histogram(bins=5)
+
+ggplot(SH_data%>%filter(ageMandarin>0), aes(x=as.numeric(ageMandarin)))+geom_histogram(bins=15)
 ```
 
 
@@ -99,59 +181,85 @@ group_data <- qualtrics_data %>%
 - scale function: vowel & nasal steps
 - treat categorical consonant initial as random effect?
 
-```{r boxplots of steps}
-pdata <- inner_join(pcibex_data, group_data, by="ParticipantID")
-
-pdata <- pdata %>%
-  group_by(Group, VowelStep, NasalStep) %>%
-  summarize( proportionNG = mean(nValue), count=n()) %>%
-  # calculate 95% confidence intervals
-  mutate(ci = sqrt((proportionNG * (1 - proportionNG))/count))
-
-vowel_plot <- ggplot(pdata, aes(x=as.factor(VowelStep), y=proportionNG))
-
-plot1 <- vowel_plot +
-  geom_boxplot(fill="steel blue")+
-  facet_wrap(~Group)
-
-nasal_plot <- ggplot(pdata, aes(x=as.factor(NasalStep), y=proportionNG))
-
-plot2 <- nasal_plot +
-  geom_boxplot(fill="steel blue")+
-  facet_wrap(~Group)
-
-
-plot1 / plot2
-```
-
 ```{r CI plot}
+# pdata = plot data
+pdata <- combined_data %>%
+  group_by(Group, VowelStep, NasalStep, NasalStep_1to5) %>%
+  summarise(proportionNG = mean(nValue), count=n()) %>%
+  # calculate 95% confidence intervals
+  mutate(ci = sqrt((proportionNG * (1 - proportionNG))/count) * 1.96,
+         NasalStep_cat = as.factor(NasalStep_1to5),
+         VowelStep_cat = as.factor(VowelStep))
+
+# range(pdata$proportionNG-pdata$ci)
+# range(pdata$proportionNG+pdata$ci)
+
 ci1 <- ggplot(pdata%>%filter(!(NasalStep == 6 | NasalStep == 15)), 
        aes(x=VowelStep, y=proportionNG, color=Group))+
+  geom_hline(yintercept = 0.5, alpha=0.4)+
   geom_line()+
   geom_point()+
   geom_errorbar(aes(ymin = proportionNG - ci, ymax = proportionNG + ci), width=.5)+
-  scale_color_viridis_d(end = 0.7)+
-  theme_bw()+
-  facet_wrap(~as.factor(NasalStep))+
+  facet_wrap(~NasalStep_cat,
+             labeller = labeller(NasalStep_cat =
+                                   c( "1" = "Alveolar /n/" , 
+                                      "3" = "Ambiguous nasal", 
+                                      "5" = "Velar /ŋ/")))+
+  scale_y_continuous(limits = c(0, 1))+
   scale_x_continuous(limits = c(1, 20),
-                     breaks = c(1, 6, 10, 15, 20)) 
+                     breaks = c(1, 6, 10, 15, 20))+
+  scale_color_viridis_d(end = 0.7)+
+  theme_apa()+
+  labs(x="Vowel /a/ Steps from front to back", 
+       y = "Proportion of /ŋ/", 
+       title = "Across the vowel continua")+ 
+  theme(plot.margin = unit(c(10,10,10,10), "pt"))
 
 ci2 <- ggplot(pdata%>%filter(!(VowelStep == 6 | VowelStep == 15)), 
        aes(x=NasalStep, y=proportionNG, color= Group))+
+  geom_hline(yintercept = 0.5, alpha=0.4)+
   geom_line()+
   geom_point()+
   geom_errorbar(aes(ymin = proportionNG - ci, ymax = proportionNG + ci), width=.5)+
-  scale_color_viridis_d(end = 0.7)+
-  theme_bw()+
-  facet_wrap(~as.factor(VowelStep))+
+  facet_wrap(~VowelStep_cat,
+             labeller = labeller(VowelStep_cat =
+                                   c( "1" = "/a/ preceding /n/" , 
+                                      "10.5" = "Ambiguous vowel", 
+                                      "20" = "/a/ preceding /ŋ/")))+
   scale_x_continuous(limits = c(1, 20),
-                     breaks = c(1, 6, 10, 15, 20)) 
+                     breaks = c(1, 6, 10, 15, 20))+
+  scale_y_continuous(limits = c(0,1))+
+  scale_color_viridis_d(end = 0.7)+
+  theme_apa()+ 
+  labs(x="Nasal Steps from /n/ to /ŋ/", 
+       y = "Proportion of /ŋ/", 
+       title = "Across the nasal continua")+
+  theme(plot.margin = unit(c(10,10,10,10), "pt"))
 
-ci1
-ci2
+ci1/ci2
 ```
 
-```{r by participant}
+Caption: Mean proportions of velar /ŋ/ responses (with 95%CI) across the vowel/nasal continua
+
+```{r boxplots of steps, include=FALSE, eval=FALSE}
+
+boxplot <- ggplot(pdata%>%filter(!(NasalStep == 6 | NasalStep == 15) & !(VowelStep == 6 | VowelStep == 15)), aes(x=as.factor(Group), y=proportionNG))+ 
+  geom_boxplot()+
+  stat_summary(fun.y=mean, geom="point", size=2) + 
+  stat_summary(fun.data = mean_se, geom = "errorbar", width = 0.2, color = "red") +
+  theme_apa()
+
+plot1 <- boxplot +
+  facet_wrap(~VowelStep)
+
+plot2 <- boxplot +
+  facet_wrap(~NasalStep)
+
+plot1 / plot2
+
+```
+
+```{r by participant, include=FALSE, eval=FALSE}
 pdata <- pcibex_data %>%
   group_by(ParticipantID, VowelStep, NasalStep) %>%
   summarize( proportionNG = mean(nValue), count=n()) %>%
@@ -190,21 +298,12 @@ plot3
 ## Mixed-effect logistic regression
 
 ```{r regression model 1}
-regression_data <- inner_join(pcibex_data, group_data, by="ParticipantID")
-regression_data <- regression_data %>%
-  mutate(Value_c = ifelse(nValue==0, -0.5, 0.5),
-         # Treatment coding for group: BJ as reference
-         Group_tr = ifelse(Group=="BJ", 0, 1),
-         # Center VowelStep and NasalStep around 0
-         cVowelStep = VowelStep-10.5,
-         cNasalStep = NasalStep-10.5)
+regression_data <- combined_data
 
-m1 <- glmer( nValue ~ Group_tr +
-                  cVowelStep + cNasalStep +
-                  Group_tr * cVowelStep+
-                  Group_tr * cNasalStep+
-                  (1 | ParticipantID) + 
-                  (1 | Initial), 
+m1 <- glmer( nValue ~ Group_tr * cVowelStep+
+                      Group_tr * cNasalStep+
+                      (1 | ParticipantID) + 
+                      (1 | Initial), 
                   family = "binomial",
                 control = glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e6)),
                 data = regression_data)
@@ -212,30 +311,10 @@ m1 <- glmer( nValue ~ Group_tr +
 summary(m1)
 ```
 
-#### Keep it maximal
-- If a factor is within-unit and there are multiple observations per treatment level per unit, then you need a by-unit random slope for that factor.
-- 
-
-```{r maximal random effects}
-maximal <- glmer( nValue ~ Group_tr +
-                  cVowelStep + cNasalStep +
-                  Group_tr*cVowelStep+
-                  Group_tr*cNasalStep+
-                  (0 + cVowelStep | ParticipantID)+
-                  (0 + cNasalStep | ParticipantID)+
-                  (1 | ParticipantID) + 
-                  (1 | Initial), 
-                  family = "binomial",
-                control = glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e6)),
-                data = regression_data)
-
-summary(maximal)
-```
-
-
-```{r regression model 2}
-m2 <- glmer( nValue ~ Group_tr +
-                  cVowelStep * cNasalStep +
+```{r regression model 2: more interaction}
+m2 <- glmer( nValue ~ cVowelStep * cNasalStep +
+                  Group_tr * cVowelStep+
+                  Group_tr * cNasalStep+
                   (1 | ParticipantID) + 
                   (1 | Initial), 
                   family = "binomial",
@@ -246,17 +325,224 @@ summary(m2)
 ```
 
 
-## GLM: Response time
-```{r scale RT within participant}
-regression_data %>%
-  group_by()
+```{r three-way interaction}
+three_way <- glmer( nValue ~ Group_tr*cVowelStep*cNasalStep+
+                  (1 | ParticipantID) + 
+                  (1 | Initial), 
+                  family = "binomial",
+                control = glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e6)),
+                data = regression_data)
+
+summary(three_way)
+```
+```{r compare three models}
+anova(m1, m2, three_way)
+```
+
+How to write up:
+https://www.statsimprove.com/en/how-to-write-report-fitted-mixed-effect-model/
+
+```{r reporting regression results}
+# https://jtools.jacob-long.com/articles/summ.html
+summ(m2, confint = TRUE, digits = 3, ci.width=.95)
+glm_summ <- summ(m2,digits = 3)
+glm_table <- glm_summ[["coeftable"]]
+#psychTools::df2latex(glm_table, digits = 3)
 ```
 
 
+#### Keep it maximal
+- If a factor is within-unit and there are multiple observations per treatment level per unit, then you need a by-unit random slope for that factor.
+
+```{r adding random slopes}
+maximal <- glmer( nValue ~  cVowelStep * cNasalStep +
+                  Group_tr * cVowelStep +
+                  Group_tr * cNasalStep +
+                  (1 | ParticipantID) + 
+                  (1 + cVowelStep | Group_tr:ParticipantID) +
+                  (1 + cVowelStep  | Initial),
+                  family = "binomial",
+                control = glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e6)),
+                data = regression_data)
+
+summary(maximal)
+
+anova(maximal, m2)
+```
+
+
+```{r adding random slopes}
+library(effects)
+plot(allEffects(maximal))
+
+plot_model(maximal, show.values = TRUE, value.offset = .3, show.intercept = TRUE)
+
+plot_model(maximal, type = "pred", terms = c("cNasalStep", "Group_tr"), show.intercept = TRUE, show.p = TRUE)
+# plot_model(maximal)
+plot_model(maximal, type = "int", terms = c("cNasalStep", "Group_tr"))
+```
+
+#### Post-hoc SH group
+
+```{r SH group model}
+SH_regression_data <- regression_data %>%
+  filter(Group_tr==1)%>%
+  mutate(bilingual_bi = ifelse(as.numeric(ageMandarin)==0, 1, 0))
+
+SH_m1 <- glmer( nValue ~ cVowelStep * cNasalStep+
+                  (1 | ParticipantID) + 
+                  (1 | Initial), 
+                  family = "binomial",
+                control = glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e6)),
+                data = SH_regression_data)
+
+summary(SH_m1)
+```
+```{r SH model with binary bilingual variable}
+SH_m2 <- glmer( nValue ~ cVowelStep * cNasalStep+
+                  bilingual_bi +
+                  (1 | ParticipantID) + 
+                  (1 | Initial), 
+                  family = "binomial",
+                control = glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e6)),
+                data = SH_regression_data)
+
+summary(SH_m2)
+```
+
+```{r bilingual with interaction}
+SH_m3 <- glmer( nValue ~ cVowelStep * cNasalStep+
+                  bilingual_bi * cVowelStep+
+                  bilingual_bi * cNasalStep+
+                  (1 | ParticipantID) + 
+                  (1 | Initial), 
+                  family = "binomial",
+                control = glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e6)),
+                data = SH_regression_data)
+
+summary(SH_m3)
+
+anova(SH_m2, SH_m3)
+```
+
+
+#### lmer: RT?
+```{r RT model, include=FALSE, eval=FALSE}
+ggplot(regression_data, aes(RT))+
+  geom_density()+
+  facet_wrap(~ParticipantID)
+  
+RT_m1 <- lmer( RT ~ Group_tr*cVowelStep*cNasalStep+
+                  (1 | ParticipantID) + 
+                  (1 | Initial), 
+                  family = "binomial",
+                control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e6)),
+                data = RT_data)
+```
+
+## Descriptive Stats, t-test
+
+```{r descriptive, eval=FALSE}
+furniture::table1(language_data, splitby = ~Group, Gender, Age, ageMandarin_cat, n_languages, liveAbroad, output = "latex", na.rm = FALSE)
+```
+
+### non-parametric tests of endpoint values
+```{r non-parametric test}
+endpoint_sample <- combined_data %>%
+  filter((VowelStep == 1 & NasalStep == 1) | (VowelStep == 20 & NasalStep == 20)) %>%
+  mutate(Correct = ifelse(VowelStep == 1 & nValue == 0, 1,
+                          ifelse(VowelStep == 20 & nValue == 1, 1, 0)),
+         Group = as.factor(Group)) %>%
+  group_by(ParticipantID, Group) %>%
+  summarise(pct_correct = sum(Correct)/n()) %>%
+  select(-ParticipantID)
+
+# test normality
+endpoint_sample_SH <- endpoint_sample %>%
+  filter(Group == "SH")
+endpoint_sample_BJ <- endpoint_sample %>%
+  filter(Group == "BJ")
+
+shapiro.test(endpoint_sample$pct_correct)
+shapiro.test(endpoint_sample_SH$pct_correct)
+shapiro.test(endpoint_sample_BJ$pct_correct)
+
+# p = 0.001, not normal, use non-parametric test
+coin::wilcox_test(pct_correct~Group, data=endpoint_sample)
+
+compare_group <- wilcox.test(endpoint_sample$pct_correct~endpoint_sample$Group, exact=FALSE)
+BJ_wilcox <- wilcox.test(endpoint_sample_BJ$pct_correct, mu = 0.5, alternative = "greater", exact=FALSE)
+SH_wilcox <- wilcox.test(endpoint_sample_SH$pct_correct, mu = 0.5, alternative = "greater", exact=FALSE)
+# Compare group: Z
+qnorm(compare_group$p.value/2)
+# Z: BJ
+qnorm(BJ_wilcox$p.value/2)
+# Z: SH
+qnorm(SH_wilcox$p.value/2)
+```
+
+```{r box plot for endpoint values}
+boxplot <- ggplot(endpoint_sample, aes(x = Group, y = pct_correct)) +
+  geom_boxplot(outlier.shape = 4) +
+  stat_summary(fun = "mean", color = "red", shape = 15) +
+  stat_summary(
+    fun.data = mean_se,
+    geom = "errorbar",
+    width = 0.1,
+    color = "red",
+    alpha = 0.7
+  ) +
+  geom_jitter(
+    data = endpoint_sample %>% filter(!(Group == "BJ" &
+                                          pct_correct < 0.8)),
+    alpha = 0.3,
+    color = "blue",
+    width = 0.3,
+    height = 0
+  ) +
+  geom_point(
+    data = endpoint_sample %>% filter(Group == "BJ" & pct_correct < 0.8),
+    alpha = 0.3,
+    color = "blue"
+  ) +
+  geom_signif(
+    comparisons = list(c("BJ", "SH")),
+    map_signif_level = TRUE,
+    margin_top = 0.2
+  ) +
+  scale_y_continuous(limits = c(0.5, 1.1),
+                     breaks = c(0.5, 0.6, 0.7, 0.8, 0.9, 1.0)) +
+  theme_apa() +
+  labs(y = "Proportion of correct responses ",
+       title = "Identification of the endpoint stimuli")
+
+boxplot
+```
+
+## Incongruency?
+
+```{r include=FALSE, eval=FALSE}
+incongruent <- combined_data %>%
+  filter((VowelStep == 1 & NasalStep == 20) | (VowelStep == 20 & NasalStep == 1)) %>%
+  mutate(VowelStep = as.factor(VowelStep),
+         NasalStep = as.factor(NasalStep),
+         Value = as.factor(Value)) %>%
+  select(ParticipantID, Group, Value, VowelStep, NasalStep)
+
+cont_table <- xtabs(~Group+VowelStep+Value, incongruent)
+# Latex output!!
+# xtableFtable(ftable(cont_table))
+vcd_table <- structable(~VowelStep+Value+Group, incongruent)
+```
+
+
+## Random links
+- Visualization three-way interaction: https://stackoverflow.com/questions/49086652/visualising-a-three-way-interaction-between-two-continuous-variables-and-one-cat
+- Combine group color and line type: https://stackoverflow.com/questions/53581787/ggplot2-combining-group-color-and-linetype
 
 ## Misc analysis
 
-```{r EDA}
+```{r EDA, include=FALSE, eval=FALSE}
 # Response time and stimulus type
 pcibex_data %>%
   filter(ParticipantID != 54729) %>%
@@ -266,20 +552,12 @@ pcibex_data %>%
   arrange(desc(meanRT))
 ```
 
-```{r random plot}
+```{r random plot,  include=FALSE, eval=FALSE}
 pcibex_data %>%
   group_by(VowelStep, NasalStep) %>%
   summarize(proportionNG=sum(Value=="ng")/n())%>%
   ggplot(aes(x=VowelStep, y=NasalStep, fill= proportionNG))+geom_raster()+scale_fill_viridis_b()
 ```
 
-```{r contradictive endpoints}
-contradictive <- regression_data %>%
-  filter( (VowelStep == 1 & NasalStep == 20) | (VowelStep == 20 & NasalStep ==1 ))
-
-contradictive %>%
-  group_by(Value, VowelStep, NasalStep) %>%
-  summarise(n())
-```
 
 
